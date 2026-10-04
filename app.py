@@ -18,6 +18,7 @@ from language_support import (
     SUPPORTED_EXTENSIONS,
     SUPPORTED_LANGUAGES,
     analyze_syntax,
+    compile_source,
     detect_language,
 )
 
@@ -296,6 +297,40 @@ def get_analysis(analysis_id):
         print(f"❌ Error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/compile', methods=['POST'])
+def compile_code():
+    """Automatically detect and compile/check Java, Python, C++, or C code.
+
+    Submitted code is never executed; only the language syntax/compiler check
+    is run inside a temporary directory.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        source_code = data.get('code', data.get('source_code'))
+        language = data.get('language')
+        file_name = data.get('file_name', data.get('filename'))
+
+        if source_code is None:
+            return jsonify({
+                'success': False,
+                'error': 'Source code is required in the "code" field.'
+            }), 400
+        if not isinstance(source_code, str):
+            return jsonify({'success': False, 'error': 'Source code must be a string.'}), 400
+        if file_name is not None and not isinstance(file_name, str):
+            return jsonify({'success': False, 'error': 'Filename must be a string.'}), 400
+        if len(source_code.encode('utf-8')) > 1_000_000:
+            return jsonify({'success': False, 'error': 'Source code must be 1 MB or smaller.'}), 413
+
+        result = compile_source(source_code, language=language, file_name=file_name)
+        return jsonify({'success': True, **result})
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        print(f'Compile error: {exc}')
+        return jsonify({'success': False, 'error': 'Unable to compile source code.'}), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -314,6 +349,7 @@ def home():
         'endpoints': [
             'POST /api/analyze - Analyze a GitHub repository',
             'GET /api/analysis/<analysis_id> - Get analysis results',
+            'POST /api/compile - Automatically compile/check a source snippet',
             'GET /api/health - Health check'
         ],
         'supported_languages': SUPPORTED_LANGUAGES,

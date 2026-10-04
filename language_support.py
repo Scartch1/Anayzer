@@ -47,11 +47,40 @@ EXTENSION_TO_LANGUAGE = _build_extension_map()
 SUPPORTED_LANGUAGES = [spec['label'] for spec in LANGUAGE_SPECS.values()]
 SUPPORTED_EXTENSIONS = sorted({ext for spec in LANGUAGE_SPECS.values() for ext in spec['extensions']})
 
+# Names accepted by the compile API.  The UI can use either the internal key,
+# the display label, or the names commonly used in editor language pickers.
+LANGUAGE_ALIASES = {
+    'c': 'c',
+    'clanguage': 'c',
+    'c language': 'c',
+    'cpp': 'cpp',
+    'c++': 'cpp',
+    'cplusplus': 'cpp',
+    'c plus plus': 'cpp',
+    'java': 'java',
+    'python': 'python',
+    'py': 'python',
+}
+
 
 def detect_language(file_name):
     """Return the internal language key for a filename, or None if unsupported."""
     extension = os.path.splitext(file_name)[1].lower()
     return EXTENSION_TO_LANGUAGE.get(extension)
+
+
+def normalize_language(language):
+    """Convert a client-supplied language name to a supported internal key."""
+    if not language:
+        return None
+    normalized = re.sub(r'[_-]+', ' ', str(language).strip().lower())
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return LANGUAGE_ALIASES.get(normalized) or (normalized if normalized in LANGUAGE_SPECS else None)
+
+
+def language_label(language):
+    """Return the user-facing label for an internal language key."""
+    return LANGUAGE_SPECS[language]['label']
 
 
 def get_missing_tool_hint(language):
@@ -368,3 +397,64 @@ def analyze_syntax(file_path, language, repo_root=None, timeout=30):
                     pass
 
     return errors, warnings, compile_output
+
+
+def compile_source(source_code, language=None, file_name=None, timeout=15):
+    """Compile/check a source snippet without executing it.
+
+    Language is inferred from ``file_name`` when possible.  Only a temporary
+    source file is passed to the language compiler and it is always removed
+    before returning.
+    """
+    if not isinstance(source_code, str):
+        raise ValueError('Source code must be a string.')
+
+    detected_language = detect_language(file_name) if file_name else None
+    selected_language = normalize_language(language) or detected_language
+    if not selected_language:
+        raise ValueError(
+            'Language is required when it cannot be detected from the filename. '
+            'Supported languages: Java, Python, C++, and C.'
+        )
+
+    extension = os.path.splitext(file_name or '')[1].lower()
+    if extension not in LANGUAGE_SPECS[selected_language]['extensions']:
+        extension = LANGUAGE_SPECS[selected_language]['extensions'][0]
+
+    safe_name = os.path.basename(file_name or f'Main{extension}')
+    stem = os.path.splitext(safe_name)[0] or 'Main'
+
+    # javac requires the source file to use the public type's name.
+    if selected_language == 'java':
+        public_type = re.search(
+            r'\bpublic\s+(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)',
+            source_code,
+        )
+        if public_type:
+            stem = public_type.group(1)
+        extension = '.java'
+
+    temp_dir = tempfile.mkdtemp(prefix='code-compile-')
+    source_path = os.path.join(temp_dir, f'{stem}{extension}')
+    try:
+        with open(source_path, 'w', encoding='utf-8', newline='') as source_file:
+            source_file.write(source_code)
+
+        errors, warnings, compile_output = analyze_syntax(
+            source_path,
+            selected_language,
+            repo_root=temp_dir,
+            timeout=timeout,
+        )
+        return {
+            'language': selected_language,
+            'language_label': language_label(selected_language),
+            'file_name': os.path.basename(source_path),
+            'success': not errors,
+            'errors': errors,
+            'warnings': warnings,
+            'compile_output': compile_output,
+        }
+    finally:
+        import shutil
+        shutil.rmtree(temp_dir, ignore_errors=True)
