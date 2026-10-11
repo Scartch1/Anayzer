@@ -381,7 +381,7 @@ def analyze_syntax(file_path, language, repo_root=None, timeout=30):
             'type': 'error',
         })
     except FileNotFoundError:
-        errors.append({
+        warnings.append({
             'line': 0,
             'message': f'Compiler unavailable: {get_missing_tool_hint(language)} is not installed in this analyzer environment; source was not checked.',
             'type': 'unavailable',
