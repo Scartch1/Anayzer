@@ -1,7 +1,7 @@
 {
   "build": {
-    "builder": "NIXPACKS",
-    "buildCommand": "pip install -r requirements.txt"
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "./Dockerfile"
   },
   "deploy": {
     "startCommand": "gunicorn --bind 0.0.0.0:${PORT:-8080} app:app",
