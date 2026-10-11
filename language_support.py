@@ -1,6 +1,7 @@
 import ast
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,15 @@ LANGUAGE_ALIASES = {
 }
 
 
+def _resolve_tool(*names):
+    """Resolve a compiler from PATH, allowing deployments to bundle toolchains."""
+    for name in names:
+        resolved = shutil.which(name)
+        if resolved:
+            return resolved
+    return names[0]
+
+
 def detect_language(file_name):
     """Return the internal language key for a filename, or None if unsupported."""
     extension = os.path.splitext(file_name)[1].lower()
@@ -104,17 +114,17 @@ def build_analysis_command(language, file_path, repo_root=None):
     cleanup_paths = []
 
     if language == 'c':
-        return ['gcc', '-fsyntax-only', '-Wall', '-Wextra', '-std=c11', file_path], cleanup_paths
+        return [_resolve_tool('gcc', 'clang'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c11', file_path], cleanup_paths
 
     if language == 'cpp':
-        return ['g++', '-fsyntax-only', '-Wall', '-Wextra', '-std=c++14', file_path], cleanup_paths
+        return [_resolve_tool('g++', 'clang++'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c++14', file_path], cleanup_paths
 
     if language == 'java':
         output_dir = tempfile.mkdtemp(prefix='java-syntax-')
         cleanup_paths.append(output_dir)
         source_root = repo_root or os.path.dirname(file_path)
         return [
-            'javac',
+            _resolve_tool('javac'),
             '-proc:none',
             '-Xlint:all',
             '-d', output_dir,
@@ -123,7 +133,7 @@ def build_analysis_command(language, file_path, repo_root=None):
         ], cleanup_paths
 
     if language == 'javascript':
-        return ['node', '--check', file_path], cleanup_paths
+        return [_resolve_tool('node'), '--check', file_path], cleanup_paths
 
     if language == 'csharp':
         project_dir = tempfile.mkdtemp(prefix='csharp-syntax-')
@@ -170,7 +180,7 @@ def build_analysis_command(language, file_path, repo_root=None):
 '''
         with open(project_path, 'w', encoding='utf-8') as project_file:
             project_file.write(project_xml)
-        return ['dotnet', 'build', project_path, '--nologo', '-clp:NoSummary'], cleanup_paths
+        return [_resolve_tool('dotnet'), 'build', project_path, '--nologo', '-clp:NoSummary'], cleanup_paths
 
     raise ValueError(f'Unsupported language: {language}')
 
@@ -373,8 +383,8 @@ def analyze_syntax(file_path, language, repo_root=None, timeout=30):
     except FileNotFoundError:
         errors.append({
             'line': 0,
-            'message': f'Compiler not found. Please install {get_missing_tool_hint(language)}.',
-            'type': 'error',
+            'message': f'Compiler unavailable: {get_missing_tool_hint(language)} is not installed in this analyzer environment; source was not checked.',
+            'type': 'unavailable',
         })
     except Exception as exc:
         errors.append({
