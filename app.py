@@ -45,6 +45,11 @@ analysis_storage = {}
 def analyze_file(file_path, language, repo_root=None):
     """Analyze a single source file."""
     errors, warnings, _ = analyze_syntax(file_path, language, repo_root=repo_root)
+    # Toolchain availability is an analyzer warning, not a source-code error.
+    unavailable = [item for item in errors if item.get('type') == 'unavailable']
+    if unavailable:
+        errors = [item for item in errors if item.get('type') != 'unavailable']
+        warnings.extend(unavailable)
     return errors, warnings
 
 def detect_branch(repo_url):

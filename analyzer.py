@@ -34,6 +34,12 @@ class CodeAnalyzer:
             repo_root=repo_root,
             timeout=self.compile_timeout
         )
+        # A missing compiler means this file was not checked; it is not a code
+        # error and should not fail the repository analysis result.
+        unavailable = [item for item in errors if item.get('type') == 'unavailable']
+        if unavailable:
+            errors = [item for item in errors if item.get('type') != 'unavailable']
+            warnings.extend(unavailable)
         return {
             'errors': errors,
             'warnings': warnings,
