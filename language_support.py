@@ -114,10 +114,16 @@ def build_analysis_command(language, file_path, repo_root=None):
     cleanup_paths = []
 
     if language == 'c':
-        return [_resolve_tool('gcc', 'clang'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c11', file_path], cleanup_paths
+        command = [_resolve_tool('gcc', 'clang'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c11']
+        if repo_root:
+            command.extend(['-I', repo_root])
+        return command + [file_path], cleanup_paths
 
     if language == 'cpp':
-        return [_resolve_tool('g++', 'clang++'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c++14', file_path], cleanup_paths
+        command = [_resolve_tool('g++', 'clang++'), '-fsyntax-only', '-Wall', '-Wextra', '-std=c++14']
+        if repo_root:
+            command.extend(['-I', repo_root])
+        return command + [file_path], cleanup_paths
 
     if language == 'java':
         output_dir = tempfile.mkdtemp(prefix='java-syntax-')
@@ -346,10 +352,102 @@ def _run_python_syntax_check(file_path):
     return errors, warnings, ''
 
 
+_MISSING_CODE_FIXES = {
+    'c': {
+        'printf': '#include <stdio.h>',
+        'scanf': '#include <stdio.h>',
+        'fopen': '#include <stdio.h>',
+        'malloc': '#include <stdlib.h>',
+        'free': '#include <stdlib.h>',
+        'strlen': '#include <string.h>',
+        'strcmp': '#include <string.h>',
+        'bool': '#include <stdbool.h>',
+    },
+    'cpp': {
+        'cout': '#include <iostream>',
+        'cin': '#include <iostream>',
+        'endl': '#include <iostream>',
+        'vector': '#include <vector>',
+        'string': '#include <string>',
+        'map': '#include <map>',
+        'set': '#include <set>',
+        'unordered_map': '#include <unordered_map>',
+    },
+    'java': {
+        'Scanner': 'import java.util.Scanner;',
+        'ArrayList': 'import java.util.ArrayList;',
+        'List': 'import java.util.List;',
+        'Map': 'import java.util.Map;',
+        'HashMap': 'import java.util.HashMap;',
+        'Set': 'import java.util.Set;',
+        'HashSet': 'import java.util.HashSet;',
+        'Files': 'import java.nio.file.Files;',
+        'Path': 'import java.nio.file.Path;',
+    },
+}
+
+
+def _diagnostic_explanation(language, message):
+    lowered = message.lower()
+    if any(term in lowered for term in ('expected', 'syntax error', 'invalid syntax', 'indentation')):
+        return 'The parser could not understand this statement. Check the indicated line and the statement immediately before it for a missing delimiter, keyword, or indentation level.'
+    if any(term in lowered for term in ('not declared', 'cannot find symbol', 'undeclared', 'no such file or directory', 'module not found')):
+        return 'A name or dependency used here is not visible to this file. Check its spelling and scope, then add the required declaration, import, or header.'
+    if any(term in lowered for term in ('redefinition', 'already defined', 'duplicate')):
+        return 'This name is defined more than once in the same scope. Keep one definition or rename the conflicting declaration.'
+    if any(term in lowered for term in ('incompatible types', 'cannot be converted', 'conversion from')):
+        return 'The value type does not match what this expression or function expects. Convert the value explicitly or change the declaration to use a compatible type.'
+    if any(term in lowered for term in ('undefined reference', 'unresolved external', 'unresolved symbol')):
+        return 'Compilation reached the link step but could not find an implementation for this symbol. Add the source file or library that defines it to the project build.'
+    if 'unavailable' in lowered or 'not installed' in lowered:
+        return 'This analyzer could not run the language toolchain, so this file was not checked.'
+    return 'The language compiler rejected this code. Use the compiler message and source line below to locate the invalid statement or missing dependency.'
+
+
+def enrich_diagnostics(language, diagnostics, source):
+    """Add a readable explanation and safe, concrete fixes when identifiable."""
+    lines = source.splitlines()
+    for diagnostic in diagnostics:
+        line_number = diagnostic.get('line', 0)
+        source_line = lines[line_number - 1].rstrip() if 0 < line_number <= len(lines) else ''
+        message = diagnostic.get('message', '')
+        diagnostic['explanation'] = _diagnostic_explanation(language, message)
+        diagnostic['source_line'] = source_line
+        diagnostic['code_to_add'] = None
+
+        if diagnostic.get('type') == 'unavailable':
+            diagnostic['explanation'] = 'The analyzer could not run this language compiler, so this finding does not confirm an error in your source code.'
+            continue
+
+        # Suggest only standard imports/headers that are unambiguous from the
+        # compiler message. Never synthesize a function implementation.
+        if language in _MISSING_CODE_FIXES and any(
+            phrase in message.lower()
+            for phrase in ('not declared', 'cannot find symbol', 'undeclared')
+        ):
+            symbol_match = re.search(
+                r"symbol:\s*(?:class|variable|method)\s+([A-Za-z_]\w*)|['`]([A-Za-z_]\w*)['`]|\b([A-Za-z_]\w*)\s+(?:was not declared|is undeclared)",
+                message,
+                re.IGNORECASE,
+            )
+            candidate = next((group for group in symbol_match.groups() if group), None) if symbol_match else None
+            fix = _MISSING_CODE_FIXES[language].get(candidate) if candidate else None
+            if fix and fix not in source:
+                diagnostic['code_to_add'] = fix
+                diagnostic['explanation'] = f'{candidate} is a standard library name, but this file does not include its declaration. Add the code snippet below near the top of the file.'
+    return diagnostics
+
+
 def analyze_syntax(file_path, language, repo_root=None, timeout=30):
     """Run a language-appropriate syntax check for a single file."""
     if language == 'python':
-        return _run_python_syntax_check(file_path)
+        errors, warnings, output = _run_python_syntax_check(file_path)
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as source_file:
+                source = source_file.read()
+            return enrich_diagnostics(language, errors, source), enrich_diagnostics(language, warnings, source), output
+        except OSError:
+            return errors, warnings, output
 
     errors = []
     warnings = []
@@ -362,7 +460,8 @@ def analyze_syntax(file_path, language, repo_root=None, timeout=30):
             cmd,
             capture_output=True,
             text=True,
-            timeout=timeout
+            timeout=timeout,
+            cwd=repo_root if repo_root and os.path.isdir(repo_root) else None,
         )
         compile_output = '\n'.join(part for part in [process.stdout, process.stderr] if part)
         errors, warnings = parse_diagnostics(language, compile_output, file_path)
@@ -406,6 +505,13 @@ def analyze_syntax(file_path, language, repo_root=None, timeout=30):
                 except Exception:
                     pass
 
+    try:
+        with open(file_path, 'r', encoding='utf-8', errors='replace') as source_file:
+            source = source_file.read()
+        errors = enrich_diagnostics(language, errors, source)
+        warnings = enrich_diagnostics(language, warnings, source)
+    except OSError:
+        pass
     return errors, warnings, compile_output
 
 
